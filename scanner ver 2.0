@@ -1,146 +1,154 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import BaseModel
 import requests
-import uvicorn
+import sqlite3
 import logging
 import smtplib
 from email.message import EmailMessage
+from datetime import datetime
+import uvicorn
 
-# ------------------ CONFIGURATION ------------------
+# ---------------- CONFIGURATION ----------------
 
-app = FastAPI(title="CyberSentinel Bot", version="2.0")
+app = FastAPI(title="CyberSentinel Bot", version="3.0")
 
-# API Keys
 GOOGLE_API_KEY = "YOUR_GOOGLE_SAFE_BROWSING_KEY"
 VT_API_KEY = "YOUR_VIRUSTOTAL_API_KEY"
-
-# Email (for fallback alert)
 EMAIL_SENDER = "yourgmail@gmail.com"
 EMAIL_APP_PASSWORD = "your_app_password"
 DEFAULT_EMAIL_RECEIVER = "youremail@gmail.com"
 
-# Logging
 logging.basicConfig(filename="scan_log.txt", level=logging.INFO, format="%(asctime)s - %(message)s")
 
-# ------------------ REQUEST MODEL ------------------
+# ------------- DATABASE SETUP ----------------
+
+def init_db():
+    conn = sqlite3.connect("scans.db")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS scans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            url TEXT,
+            user_id TEXT,
+            email TEXT,
+            risk TEXT,
+            threats TEXT,
+            timestamp TEXT
+        );
+    """)
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# ------------- REQUEST MODEL ----------------
 
 class URLRequest(BaseModel):
     url: str
     user_id: str = "guest"
-    email: str = None  # User's email (optional)
+    email: str | None = None
 
-# ------------------ EMAIL ALERT FUNCTION ------------------
+# ------------- UTILITY FUNCTIONS ----------------
 
-def send_email_alert(url, risk, threats, receiver_email):
-    subject = "🚨 CyberSentinel Alert – Dangerous URL Detected"
-    body = f"""
-    ALERT: A URL scan detected a threat.
+def save_to_db(url, user_id, email, risk, threats):
+    try:
+        conn = sqlite3.connect("scans.db")
+        conn.execute(
+            "INSERT INTO scans (url, user_id, email, risk, threats, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+            (url, user_id, email, risk, threats, datetime.utcnow().isoformat())
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logging.error(f"DB error: {e}")
 
-    URL: {url}
-    Risk Level: {risk}
-    Threat Types: {', '.join(threats)}
-
-    Please avoid visiting this site.
-    """
-
+def send_email_alert(url, risk, threats, receiver):
+    subject = "🚨 CyberSentinel Alert"
+    body = f"URL: {url}\nRisk: {risk}\nThreats: {', '.join(threats)}"
     msg = EmailMessage()
     msg["From"] = EMAIL_SENDER
-    msg["To"] = receiver_email
+    msg["To"] = receiver
     msg["Subject"] = subject
     msg.set_content(body)
-
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
             smtp.login(EMAIL_SENDER, EMAIL_APP_PASSWORD)
             smtp.send_message(msg)
-        logging.info(f"Email sent to {receiver_email}")
+        logging.info(f"Email sent to {receiver}")
     except Exception as e:
-        logging.error(f"Failed to send email to {receiver_email}: {str(e)}")
+        logging.error(f"Email error: {e}")
 
-# ------------------ GOOGLE SCAN ------------------
+# ------------- SCAN HELPERS ----------------
 
-def google_safe_browsing_scan(url):
-    api_url = f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={GOOGLE_API_KEY}"
-    body = {
-        "client": {"clientId": "cybersentinel-bot", "clientVersion": "1.0"},
-        "threatInfo": {
-            "threatTypes": [
-                "MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE", "POTENTIALLY_HARMFUL_APPLICATION"
-            ],
-            "platformTypes": ["ANY_PLATFORM"],
-            "threatEntryTypes": ["URL"],
-            "threatEntries": [{"url": url}]
-        }
-    }
-
+def scan_with_google(url):
     try:
-        response = requests.post(api_url, json=body, timeout=10)
-        result = response.json()
-        if "matches" in result:
-            threats = list({match["threatType"] for match in result["matches"]})
-            return {"risk": "❌ Dangerous", "threats": threats}
-        else:
-            return {"risk": "✅ Safe", "threats": []}
+        res = requests.post(
+            f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={GOOGLE_API_KEY}",
+            json={
+                "client": {"clientId": "cybersentinel", "clientVersion": "1.0"},
+                "threatInfo": {
+                    "threatTypes": ["MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE"],
+                    "platformTypes": ["ANY_PLATFORM"],
+                    "threatEntryTypes": ["URL"],
+                    "threatEntries": [{"url": url}]
+                }
+            },
+            timeout=10
+        )
+        data = res.json()
+        if "matches" in data:
+            threats = list({match["threatType"] for match in data["matches"]})
+            return "❌ Dangerous", threats
+        return "✅ Safe", []
     except Exception as e:
-        logging.error(f"Google scan error: {str(e)}")
-        return {"risk": "⚠️ Unknown", "threats": [], "error": str(e)}
+        logging.error(f"Google scan error: {e}")
+        return "⚠️ Unknown", []
 
-# ------------------ VIRUSTOTAL SCAN ------------------
-
-def virustotal_scan(url):
-    headers = {"x-apikey": VT_API_KEY}
+def scan_with_virustotal(url):
     try:
-        submit = requests.post("https://www.virustotal.com/api/v3/urls", headers=headers, data={"url": url})
-        analysis_id = submit.json()["data"]["id"]
-
-        result = requests.get(f"https://www.virustotal.com/api/v3/analyses/{analysis_id}", headers=headers).json()
+        headers = {"x-apikey": VT_API_KEY}
+        res = requests.post("https://www.virustotal.com/api/v3/urls", headers=headers, data={"url": url})
+        scan_id = res.json()["data"]["id"]
+        result = requests.get(f"https://www.virustotal.com/api/v3/analyses/{scan_id}", headers=headers).json()
         stats = result["data"]["attributes"]["stats"]
-
         if stats["malicious"] > 0:
-            return {"risk": "❌ Dangerous", "threats": ["Malicious content"], "details": stats}
+            return "❌ Dangerous", ["Malicious"]
         elif stats["suspicious"] > 0:
-            return {"risk": "⚠️ Suspicious", "threats": ["Suspicious behavior"], "details": stats}
-        else:
-            return {"risk": "✅ Safe", "threats": [], "details": stats}
+            return "⚠️ Suspicious", ["Suspicious"]
+        return "✅ Safe", []
     except Exception as e:
-        logging.error(f"VirusTotal error: {str(e)}")
-        return {"risk": "⚠️ Unknown", "threats": [], "error": str(e)}
+        logging.error(f"VT scan error: {e}")
+        return "⚠️ Unknown", []
 
-# ------------------ MAIN API ENDPOINT ------------------
+# ------------- MAIN ENDPOINT ----------------
 
 @app.post("/scan-url")
 def scan_url(request: URLRequest):
-    url = request.url
-    user_email = request.email if request.email else DEFAULT_EMAIL_RECEIVER
+    user_email = request.email or DEFAULT_EMAIL_RECEIVER
 
-    google_result = google_safe_browsing_scan(url)
-    vt_result = virustotal_scan(url)
+    risk_g, threats_g = scan_with_google(request.url)
+    risk_v, threats_v = scan_with_virustotal(request.url)
 
-    combined_threats = google_result["threats"] + vt_result["threats"]
-    risk_flags = google_result["risk"] + vt_result["risk"]
+    all_threats = threats_g + threats_v
+    risk_status = "❌ Dangerous" if "❌" in (risk_g + risk_v) else "⚠️ Suspicious" if "⚠️" in (risk_g + risk_v) else "✅ Safe"
 
-    if "❌" in risk_flags:
-        final_risk = "❌ Dangerous"
-        send_email_alert(url, final_risk, combined_threats, user_email)
-    elif "⚠️" in risk_flags:
-        final_risk = "⚠️ Suspicious"
-    else:
-        final_risk = "✅ Safe"
+    if risk_status == "❌ Dangerous":
+        send_email_alert(request.url, risk_status, all_threats, user_email)
 
-    logging.info(f"{request.user_id} scanned {url} → {final_risk} | Threats: {combined_threats}")
+    save_to_db(request.url, request.user_id, user_email, risk_status, ", ".join(all_threats))
+    logging.info(f"{request.user_id} scanned {request.url} → {risk_status} | Threats: {all_threats}")
 
     return {
-        "url": url,
-        "risk": final_risk,
-        "threats": combined_threats,
-        "user_email": user_email,
+        "url": request.url,
+        "risk": risk_status,
+        "threats": all_threats,
+        "email_alert": user_email if risk_status == "❌ Dangerous" else None,
         "sources": {
-            "google": google_result,
-            "virustotal": vt_result
+            "Google Safe Browsing": {"risk": risk_g, "threats": threats_g},
+            "VirusTotal": {"risk": risk_v, "threats": threats_v}
         }
     }
 
-# ------------------ RUN SERVER ------------------
+# ------------- RUN ----------------
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)

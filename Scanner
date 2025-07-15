@@ -1,0 +1,183 @@
+from fastapi import FastAPI, Header, HTTPException, Request
+from pydantic import BaseModel
+import requests
+import sqlite3
+import logging
+from datetime import datetime
+from urllib.parse import urlparse
+import os
+from dotenv import load_dotenv
+from time import time
+import re
+
+# ---------------- LOAD CONFIG ----------------
+
+load_dotenv()
+
+app = FastAPI(title="CyberSentinel Bot", version="4.0 Secure")
+
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+VT_API_KEY = os.getenv("VT_API_KEY")
+SECURE_API_KEY = os.getenv("SECURE_API_KEY")
+DEFAULT_EMAIL_RECEIVER = os.getenv("DEFAULT_EMAIL_RECEIVER", "admin@example.com")
+
+logging.basicConfig(filename="scan_log.txt", level=logging.INFO, format="%(asctime)s - %(message)s")
+
+# ---------------- DATABASE INIT ----------------
+
+def init_db():
+    conn = sqlite3.connect("scans.db")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS scans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            url TEXT,
+            user_id TEXT,
+            email TEXT,
+            risk TEXT,
+            threats TEXT,
+            timestamp TEXT
+        );
+    """)
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# ---------------- INPUT MODELS ----------------
+
+class URLRequest(BaseModel):
+    url: str
+    user_id: str = "guest"
+    email: str | None = None
+
+# ---------------- UTILITIES ----------------
+
+def is_valid_url(url: str) -> bool:
+    try:
+        result = urlparse(url)
+        return all([result.scheme, result.netloc])
+    except:
+        return False
+
+def clean_string(s: str) -> str:
+    return re.sub(r"[^\w.@+-]", "", s)
+
+def save_to_db(url, user_id, email, risk, threats):
+    try:
+        conn = sqlite3.connect("scans.db")
+        conn.execute(
+            "INSERT INTO scans (url, user_id, email, risk, threats, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+            (url, user_id, email, risk, threats, datetime.utcnow().isoformat())
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logging.error(f"DB error: {e}")
+
+def log_scan(user_id: str, url: str, risk_status: str, threats: list):
+    logging.info(f"{user_id} scanned {url} → {risk_status} | Threats: {threats}")
+
+# ---------------- SCAN CACHE AND RATE LIMITING ----------------
+
+scan_cache = {}  # In-memory scan result cache
+rate_limit_window = 60  # seconds
+rate_limit_count = 10   # requests per window
+user_access_log = {}    # Tracks access timestamps
+
+def check_rate_limit(user_id: str):
+    now = time()
+    access_log = user_access_log.get(user_id, [])
+    access_log = [t for t in access_log if now - t < rate_limit_window]
+    if len(access_log) >= rate_limit_count:
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    access_log.append(now)
+    user_access_log[user_id] = access_log
+
+def get_scan_from_cache_or_api(url):
+    if url in scan_cache:
+        return scan_cache[url]
+    risk_g, threats_g = scan_with_google(url)
+    risk_v, threats_v = scan_with_virustotal(url)
+    scan_cache[url] = (risk_g, threats_g, risk_v, threats_v)
+    return scan_cache[url]
+
+# ---------------- SCANNERS ----------------
+
+def scan_with_google(url):
+    try:
+        res = requests.post(
+            f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={GOOGLE_API_KEY}",
+            json={
+                "client": {"clientId": "cybersentinel", "clientVersion": "1.0"},
+                "threatInfo": {
+                    "threatTypes": ["MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE"],
+                    "platformTypes": ["ANY_PLATFORM"],
+                    "threatEntryTypes": ["URL"],
+                    "threatEntries": [{"url": url}]
+                }
+            },
+            timeout=10
+        )
+        data = res.json()
+        if "matches" in data:
+            threats = list({match["threatType"] for match in data["matches"]})
+            return "❌ Dangerous", threats
+        return "✅ Safe", []
+    except Exception as e:
+        logging.error(f"Google scan error: {e}")
+        return "⚠️ Unknown", []
+
+def scan_with_virustotal(url):
+    try:
+        headers = {"x-apikey": VT_API_KEY}
+        res = requests.post("https://www.virustotal.com/api/v3/urls", headers=headers, data={"url": url})
+        scan_id = res.json()["data"]["id"]
+        result = requests.get(f"https://www.virustotal.com/api/v3/analyses/{scan_id}", headers=headers).json()
+        stats = result["data"]["attributes"]["stats"]
+        if stats.get("malicious", 0) > 0:
+            return "❌ Dangerous", ["Malicious"]
+        elif stats.get("suspicious", 0) > 0:
+            return "⚠️ Suspicious", ["Suspicious"]
+        return "✅ Safe", []
+    except Exception as e:
+        logging.error(f"VT scan error: {e}")
+        return "⚠️ Unknown", []
+
+# ---------------- MAIN ENDPOINT ----------------
+
+@app.post("/scan-url")
+def scan_url(request: URLRequest, x_api_key: str = Header(None)):
+    if x_api_key != SECURE_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API Key")
+
+    if not is_valid_url(request.url):
+        raise HTTPException(status_code=400, detail="Invalid URL format")
+
+    check_rate_limit(request.user_id)
+
+    clean_email = clean_string(request.email or DEFAULT_EMAIL_RECEIVER)
+    clean_user = clean_string(request.user_id)
+
+    risk_g, threats_g, risk_v, threats_v = get_scan_from_cache_or_api(request.url)
+
+    all_threats = threats_g + threats_v
+    risk_status = "❌ Dangerous" if "❌" in (risk_g + risk_v) else "⚠️ Suspicious" if "⚠️" in (risk_g + risk_v) else "✅ Safe"
+
+    save_to_db(request.url, clean_user, clean_email, risk_status, ", ".join(all_threats))
+    log_scan(clean_user, request.url, risk_status, all_threats)
+
+    return {
+        "url": request.url,
+        "risk": risk_status,
+        "threats": all_threats,
+        "sources": {
+            "Google Safe Browsing": {"risk": risk_g, "threats": threats_g},
+            "VirusTotal": {"risk": risk_v, "threats": threats_v}
+        }
+    }
+
+# ---------------- RUN ----------------
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)

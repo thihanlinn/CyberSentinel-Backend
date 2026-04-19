@@ -208,3 +208,9 @@ __marimo__/
 
 # Database
 .db
+
+# log
+.txt
+
+# ml_models
+*.pkl

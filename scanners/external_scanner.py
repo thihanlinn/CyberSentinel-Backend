@@ -1,85 +1,92 @@
-import time
-import requests
-from utils.logger import logger
-from config import VT_API_KEY, GOOGLE_API_KEY
+"""
+Google Safe Browsing & VirusTotal integrations.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import httpx
+
+from utils.logger import get_logger
+from config import VT_API_KEY, VT_TIMEOUT, GOOGLE_API_KEY, HTTP_TIMEOUT
+
+logger = get_logger("scanner.external")
 
 
-def check_virustotal(url: str):
-    if not VT_API_KEY:
-        return {"used": False, "score": 0, "malicious": False}
+@dataclass
+class ExternalResult:
+    flagged: bool
+    message: str
 
-    try:
-        headers = {"x-apikey": VT_API_KEY}
+class ExternalScanner:
 
-        r = requests.post(
-            "https://www.virustotal.com/api/v3/urls",
-            headers=headers,
-            data={"url": url}
-        )
-        r.raise_for_status()
-        analysis_id = r.json()["data"]["id"]
+    @staticmethod
+    async def check_virustotal(url: str) -> ExternalResult:
+        if not VT_API_KEY:
+            return ExternalResult(False, "VirusTotal API key not configured")
 
-        time.sleep(2)
+        try:
+            headers = {"x-apikey": VT_API_KEY}
 
-        r2 = requests.get(
-            f"https://www.virustotal.com/api/v3/analyses/{analysis_id}",
-            headers=headers
-        )
-        r2.raise_for_status()
-        stats = r2.json()["data"]["attributes"]["stats"]
+            async with httpx.AsyncClient(timeout=VT_TIMEOUT) as client:
+                submit = await client.post(
+                    "https://www.virustotal.com/api/v3/urls",
+                    headers=headers,
+                    data={"url": url},
+                )
 
-        malicious = stats.get("malicious", 0)
-        suspicious = stats.get("suspicious", 0)
+                if submit.status_code != 200:
+                    return ExternalResult(False, "VirusTotal submission failed")
 
-        score = min(malicious * 20 + suspicious * 10, 60)
-        return {"used": True, "score": score, "malicious": malicious > 0}
+                analysis_id: str = submit.json()["data"]["id"]
 
-    except Exception as e:
-        logger.warning(f"VirusTotal error: {e}")
-        return {"used": True, "score": 0, "malicious": False}
+                report_resp = await client.get(
+                    f"https://www.virustotal.com/api/v3/analyses/{analysis_id}",
+                    headers=headers,
+                )
+                report_resp.raise_for_status()
+                stats = report_resp.json()["data"]["attributes"]["stats"]
 
+            malicious: int = stats.get("malicious", 0)
+            if malicious > 0:
+                return ExternalResult(True, f"Flagged by {malicious} VirusTotal vendors")
+            return ExternalResult(False, f"Clean ({stats.get('harmless', 0)} vendors OK)")
 
-def check_google_safe(url: str):
-    if not GOOGLE_API_KEY:
-        return {"used": False, "score": 0, "malicious": False}
+        except Exception as e:
+            logger.warning(f"VirusTotal error: {e}")
+            return ExternalResult(False, f"VirusTotal error: {str(e)[:80]}")
 
-    try:
-        endpoint = f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={GOOGLE_API_KEY}"
+    @staticmethod
+    async def check_google_safebrowsing(url: str) -> ExternalResult:
+        if not GOOGLE_API_KEY:
+            return ExternalResult(False, "Google API key not configured")
 
-        body = {
-            "client": {"clientId": "cybersentinel", "clientVersion": "12.0"},
+        payload = {
+            "client": {"clientId": "cybersentinel", "clientVersion": "2.0"},
             "threatInfo": {
-                "threatTypes": ["MALWARE", "SOCIAL_ENGINEERING"],
+                "threatTypes": ["MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE"],
                 "platformTypes": ["ANY_PLATFORM"],
                 "threatEntryTypes": ["URL"],
-                "threatEntries": [{"url": url}]
-            }
+                "threatEntries": [{"url": url}],
+            },
         }
 
-        r = requests.post(endpoint, json=body)
-        r.raise_for_status()
-        data = r.json()
+        try:
+            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+                resp = await client.post(
+                    f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={GOOGLE_API_KEY}",
+                    json=payload,
+                )
+                resp.raise_for_status()
+                data = resp.json()
 
-        if "matches" in data:
-            return {"used": True, "score": 60, "malicious": True}
-        return {"used": True, "score": 0, "malicious": False}
+            if "matches" in data:
+                threats = [m["threatType"] for m in data["matches"]]
+                return ExternalResult(True, f"Blocked by Google: {', '.join(threats)}")
 
-    except Exception as e:
-        logger.warning(f"Google Safe Browsing error: {e}")
-        return {"used": True, "score": 0, "malicious": False}
+            return ExternalResult(False, "Not in Google blacklist")
 
-
-def fuse_scores(local_score: int, vt_result: dict, google_result: dict):
-    api_score = 0
-    api_used = False
-
-    if vt_result["used"]:
-        api_used = True
-        api_score += vt_result["score"]
-
-    if google_result["used"]:
-        api_used = True
-        api_score += google_result["score"]
-
-    final_score = min(local_score + api_score, 100)
-    return final_score, api_used
+        except Exception as e:
+            logger.warning(f"Google Safe Browsing error: {e}")
+            return ExternalResult(False, f"Google API error: {str(e)[:80]}")

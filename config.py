@@ -19,8 +19,8 @@ ML_MODEL_FILE: str = os.getenv("ML_MODEL_FILE")
 LOG_FILE:      str = os.getenv("LOG_FILE")
 
 # RATE LIMITING
-RATE_LIMIT_WINDOW: int = int(os.getenv("RATE_LIMIT_WINDOW", "60"))   # seconds
-RATE_LIMIT_COUNT:  int = int(os.getenv("RATE_LIMIT_COUNT",  "10"))   # max requests per window
+RATE_LIMIT_WINDOW: int = 60     # seconds
+RATE_LIMIT_COUNT:  int = 10     # max requests per window
 
 # RISK THRESHOLDS
 DANGEROUS_THRESHOLD:  int = 70
@@ -164,7 +164,5 @@ MEDIUM_RISK_PATTERNS = [
     "No HTTPS encryption",
     "Suspicious TLD",
     "Sensitive keywords in URL",
-    "Unusually long URL",
-    "Too many dots",
-    "Too many hyphens"
+    "Unusually long URL"
 ]

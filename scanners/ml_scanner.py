@@ -68,7 +68,19 @@ class MLScanner:
                 values = shap_values[0]
 
             values = np.array(values).flatten() # Convert to 1D array
-            importance = list(zip(sample.columns, values))
+
+            #Get feature values from sample
+            feature_values = sample.iloc[0].to_dict()
+
+            importance = []
+            for feature, shap_val in zip(sample.columns, values):
+                val = feature_values.get(feature)
+
+                # skip features with no value
+                if val in [0, False, None] or (isinstance(val, float) and np.isnan(val)):
+                    continue
+
+                importance.append((feature, shap_val))
             importance.sort(key=lambda x: abs(float(x[1])), reverse=True)
             return importance[:5]
 

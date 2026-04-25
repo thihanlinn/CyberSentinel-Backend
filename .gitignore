@@ -208,3 +208,9 @@ __marimo__/
 
 # Database
 .db
+
+scans.db
+scan_log.txt
+scanners/scan_log.txt
+*.log
+*.db

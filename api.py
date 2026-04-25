@@ -203,8 +203,6 @@ async def scan_url(
     if google_result.flagged or vt_result.flagged:
         final_score = min(100, final_score + EXTERNAL_BOOST)
 
-    findings.append(f"ML Analysis: {ml_result.label} ({ml_score:.2f}/100)")
-
     #  Classification (pattern-aware)
     risk = classify(final_score, findings,
                     vt_result.flagged, google_result.flagged)

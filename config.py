@@ -37,6 +37,30 @@ BRAND_NAMES = [
     "bankofamerica", "wellsfargo", "chase", "dropbox", "dhl", "fedex"
 ]
 
+URL_SHORTENERS = {
+    "bit.ly", "tinyurl.com", "goo.gl", "ow.ly", "is.gd", "buff.ly", "adf.ly",
+    "short.link", "shorte.st", "cutt.ly", "rb.gy", "tiny.cc"
+}
+
+TRUSTED_SSL_ISSUERS = ["digicert", "letsencrypt", "godaddy", "comodo", "globalsign",
+                       "entrust", "sectigo", "google", "amazon", "zerossl"]
+
+SAFE_PORTS = {80, 443, 8080, 8443}
+
+# Numeric limits & thresholds
+MAX_RULE_SCORE = 100
+HTTP_TIMEOUT = 5
+SSL_TIMEOUT = 10
+DOMAIN_NEW_DAYS = 30
+DOMAIN_YOUNG_DAYS = 180
+SSL_EXPIRY_WARN_DAYS = 30
+SUBDOMAIN_WARN_COUNT = 3
+URL_LENGTH_WARN = 100
+MAX_QUERY_PARAMS = 10
+MAX_ALLOWED_REDIRECTS = 3
+
+# HTTP settings
+DEFAULT_USER_AGENT = "CyberSentinel/12.0"
 
 # RISK DEFINITIONS
 
@@ -51,6 +75,11 @@ MEDIUM_RISK_PATTERNS = [
     "No HTTPS encryption",
     "Suspicious TLD",
     "Sensitive keywords in URL",
-    "Too many dots",
-    "Too many hyphens"
+    "Excessive subdomains",
+    "Non-standard port",
+    "URL shortener",
+    "Many query parameters",
+    "Domain less than 6 months old",
+    "SSL certificate from unusual issuer",
+    "Suspicious keywords in page title"
 ]
